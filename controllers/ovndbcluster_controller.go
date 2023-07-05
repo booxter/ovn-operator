@@ -90,7 +90,6 @@ func (r *OVNDBClusterReconciler) GetScheme() *runtime.Scheme {
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=roles,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=get;list;watch;create;update
 // service account permissions that are needed to grant permission to the above
-// +kubebuilder:rbac:groups="security.openshift.io",resourceNames=anyuid,resources=securitycontextconstraints,verbs=use
 // +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete;get;list;patch;update;watch
 
 // Reconcile - OVN DBCluster
@@ -240,12 +239,6 @@ func (r *OVNDBClusterReconciler) reconcileNormal(ctx context.Context, instance *
 
 	// Service account, role, binding
 	rbacRules := []rbacv1.PolicyRule{
-		{
-			APIGroups:     []string{"security.openshift.io"},
-			ResourceNames: []string{"anyuid"},
-			Resources:     []string{"securitycontextconstraints"},
-			Verbs:         []string{"use"},
-		},
 		{
 			APIGroups: []string{""},
 			Resources: []string{"pods"},
