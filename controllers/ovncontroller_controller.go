@@ -36,13 +36,13 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
-	"github.com/openstack-k8s-operators/lib-common/modules/common/daemonset"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/job"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/statefulset"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	"github.com/openstack-k8s-operators/ovn-operator/api/v1beta1"
 	"github.com/openstack-k8s-operators/ovn-operator/pkg/ovncontroller"
@@ -75,7 +75,7 @@ func (r *OVNControllerReconciler) GetLogger() logr.Logger {
 //+kubebuilder:rbac:groups=ovn.openstack.org,resources=ovncontrollers/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete;
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;
-//+kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=create;delete;get;list;patch;update;watch
+//+kubebuilder:rbac:groups=apps,resources=statefulset,verbs=create;delete;get;list;patch;update;watch
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;patch;update;delete;
 //+kubebuilder:rbac:groups=ovn.openstack.org,resources=ovndbclusters,verbs=get;list;watch;
 //+kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=create;delete;get;list;patch;update;watch
@@ -188,7 +188,7 @@ func (r *OVNControllerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&batchv1.Job{}).
 		Owns(&netattdefv1.NetworkAttachmentDefinition{}).
-		Owns(&appsv1.DaemonSet{}).
+		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
@@ -374,18 +374,13 @@ func (r *OVNControllerReconciler) reconcileNormal(ctx context.Context, instance 
 		return ctrlResult, nil
 	}
 
-	// Define a new DaemonSet object
-	ovnDaemonSet, err := ovncontroller.DaemonSet(instance, inputHash, serviceLabels, serviceAnnotations)
-	if err != nil {
-		r.Log.Error(err, "Failed to create OVNController DaemonSet")
-		return ctrl.Result{}, err
-	}
-	dset := daemonset.NewDaemonSet(
-		ovnDaemonSet,
+	// Define a new StatefulSet object
+	sfset := statefulset.NewStatefulSet(
+		ovncontroller.StatefulSet(instance, inputHash, serviceLabels, serviceAnnotations),
 		time.Duration(5)*time.Second,
 	)
 
-	ctrlResult, err = dset.CreateOrPatch(ctx, helper)
+	ctrlResult, err = sfset.CreateOrPatch(ctx, helper)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.DeploymentReadyCondition,
@@ -403,8 +398,8 @@ func (r *OVNControllerReconciler) reconcileNormal(ctx context.Context, instance 
 		return ctrlResult, nil
 	}
 
-	instance.Status.DesiredNumberScheduled = dset.GetDaemonSet().Status.DesiredNumberScheduled
-	instance.Status.NumberReady = dset.GetDaemonSet().Status.NumberReady
+	instance.Status.DesiredNumberScheduled = sfset.GetStatefulSet().Status.Replicas
+	instance.Status.NumberReady = sfset.GetStatefulSet().Status.ReadyReplicas
 
 	// verify if network attachment matches expectations
 	networkReady, networkAttachmentStatus, err := nad.VerifyNetworkStatusFromAnnotation(ctx, helper, networkAttachmentsNoPhysNet, serviceLabels, instance.Status.NumberReady)
@@ -430,7 +425,7 @@ func (r *OVNControllerReconciler) reconcileNormal(ctx context.Context, instance 
 	if instance.Status.NumberReady == instance.Status.DesiredNumberScheduled {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 	}
-	// create DaemonSet - end
+	// create StatefulSet - end
 
 	// create OVN Config Job - start
 	if instance.Status.NumberReady == instance.Status.DesiredNumberScheduled {
@@ -481,7 +476,7 @@ func (r *OVNControllerReconciler) reconcileNormal(ctx context.Context, instance 
 		}
 		instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
 	} else {
-		r.Log.Info("OVNController DaemonSet not ready yet. Configuration job cannot be started.")
+		r.Log.Info("OVNController StatefulSet not ready yet. Configuration job cannot be started.")
 		return ctrl.Result{Requeue: true}, nil
 	}
 	// create OVN Config Job - end
