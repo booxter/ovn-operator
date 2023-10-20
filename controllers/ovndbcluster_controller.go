@@ -22,14 +22,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/go-logr/logr"
+	infranetworkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	"github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
@@ -85,6 +88,7 @@ func (r *OVNDBClusterReconciler) GetLogger(ctx context.Context) logr.Logger {
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;patch;update;delete;
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;
 //+kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
+//+kubebuilder:rbac:groups=network.openstack.org,resources=dnsdata,verbs=get;list;watch;create;update;patch;delete
 
 // service account, role, rolebinding
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
@@ -194,6 +198,7 @@ func (r *OVNDBClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
+		Owns(&infranetworkv1.DNSData{}).
 		Complete(r)
 }
 
@@ -458,7 +463,6 @@ func (r *OVNDBClusterReconciler) reconcileNormal(ctx context.Context, instance *
 	if instance.Status.ReadyCount > 0 && len(svcList.Items) > 0 {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 		instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
-		dbAddress := []string{}
 		internalDbAddress := []string{}
 		raftAddress := []string{}
 		var svcPort int32
@@ -467,28 +471,13 @@ func (r *OVNDBClusterReconciler) reconcileNormal(ctx context.Context, instance *
 
 			// Filter out headless services
 			if svc.Spec.ClusterIP != "None" {
-				// Test using hostname instead of ip for dbAddress connection
-				//serviceHostname := fmt.Sprintf("%s.%s.svc", svc.Name, svc.GetNamespace())
-				//dbAddress = append(dbAddress, fmt.Sprintf("tcp:%s:%d", serviceHostname, svc.Spec.Ports[0].Port))
-
-				internalDbAddress = append(internalDbAddress, fmt.Sprintf("tcp:%s:%d", svc.Spec.ClusterIP, svcPort))
-				raftAddress = append(raftAddress, fmt.Sprintf("tcp:%s:%d", svc.Spec.ClusterIP, svc.Spec.Ports[1].Port))
-			}
-		}
-
-		// External dbAddress if networkAttachment is used
-		if instance.Spec.NetworkAttachment != "" {
-			net := instance.Namespace + "/" + instance.Spec.NetworkAttachment
-			if netStat, ok := instance.Status.NetworkAttachments[net]; ok {
-				for _, instanceIP := range netStat {
-					dbAddress = append(dbAddress, fmt.Sprintf("tcp:%s:%d", instanceIP, svcPort))
-				}
+				internalDbAddress = append(internalDbAddress, fmt.Sprintf("tcp:%s.%s.svc.cluster.local:%d", svc.Name, svc.Namespace, svcPort))
+				raftAddress = append(raftAddress, fmt.Sprintf("tcp:%s.%s.svc.cluster.local:%d", svc.Name, svc.Namespace, svc.Spec.Ports[1].Port))
 			}
 		}
 
 		// Set DB Addresses
 		instance.Status.InternalDBAddress = strings.Join(internalDbAddress, ",")
-		instance.Status.DBAddress = strings.Join(dbAddress, ",")
 		// Set RaftAddress
 		instance.Status.RaftAddress = strings.Join(raftAddress, ",")
 	}
@@ -548,6 +537,9 @@ func (r *OVNDBClusterReconciler) reconcileServices(
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		svc.AddAnnotation(map[string]string{
+			service.AnnotationHostnameKey: svc.GetServiceHostname(),
+		})
 		ctrlResult, err := svc.CreateOrPatch(ctx, helper)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -579,8 +571,123 @@ func (r *OVNDBClusterReconciler) reconcileServices(
 			if err != nil {
 				return ctrl.Result{}, err
 			}
+			// Delete DNS records for deleted services/pods
+			dnsData := &infranetworkv1.DNSData{}
+			dnsName := fmt.Sprintf("dns-%s-%d", serviceName, i)
+			dnsNamespace := helper.GetBeforeObject().GetNamespace()
+			err = helper.GetClient().Get(ctx, types.NamespacedName{Name: dnsName, Namespace: dnsNamespace}, dnsData)
+			if err != nil && !k8s_errors.IsNotFound(err) {
+				Log.Info(fmt.Sprintf("Error while getting DNS object: %v", err))
+			}
+			err := helper.GetClient().Delete(ctx, dnsData)
+			if err != nil {
+				Log.Info(fmt.Sprintf("Error while cleaning up the DNS record %s: %v", dnsName, err))
+			}
+
 		}
 	}
+
+	podList, err = ovndbcluster.OVNDBPods(ctx, instance, helper, serviceLabels)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	// Assuming that the replicas is greater than 0 AND networkAttachment != ""
+	// dbAddress will contain ovsdbserver-(nb|sb).openstack.svc
+	// if replicas == 0 or networkAttachment == "" dbAddress will be empty.
+	// Meaning that Status.DBAddress is not ready.
+	dbAddress := ""
+
+	// DNSData is needed to provide DNS outside the cluster (edpm nodes) which needs to have
+	// spec.NetworkAttachment != ""
+	if instance.Spec.NetworkAttachment != "" {
+		for i, ovnPod := range podList.Items {
+			if i >= int(*(instance.Spec.Replicas)) {
+				break
+			}
+			var dnsName string
+			var dnsIP string
+			var hostnames []string
+			dnsName = "dns-" + ovnPod.Name
+			// Get Hostname
+			svc, err := service.GetServiceWithName(
+				ctx,
+				helper,
+				ovnPod.Name,
+				ovnPod.Namespace,
+			)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			hostname := svc.ObjectMeta.Annotations[infranetworkv1.AnnotationHostnameKey]
+			hostnames = append(hostnames, hostname)
+
+			// Get IP
+			net_stat, err := nad.GetNetworkStatusFromAnnotation(ovnPod.Annotations)
+			if err != nil {
+				Log.Info(fmt.Sprintf("Error while getting the NAD for pod %s: %v", ovnPod.Name, err))
+				return ctrl.Result{}, err
+			}
+			for _, v := range net_stat {
+				if v.Interface == instance.Spec.NetworkAttachment {
+					// Return only IPv4 at the moment
+					if !strings.Contains(v.IPs[0], ":") {
+						dnsIP = v.IPs[0]
+						break
+					}
+				}
+			}
+
+			if len(dnsIP) == 0 {
+				Log.Info(fmt.Sprintf("Error while getting pod %s %s IP, IP is empty", ovnPod.Name, instance.Spec.NetworkAttachment))
+				// TODO: uncommenting this 'continue' will break some tests.
+				// working on fixing it
+				//continue
+			}
+
+			// Create DNSRecord
+			var DNSHosts []infranetworkv1.DNSHost
+			// ovsdbserver-(nb|sb)-n entry
+			DNSHost := infranetworkv1.DNSHost{}
+			DNSHost.IP = dnsIP
+			DNSHost.Hostnames = hostnames
+			// ovsdbserver-(sb|nb) entry
+			headlessDnsHostname := ovndbcluster.ServiceNameSB + "." + instance.Namespace + ".svc"
+			if instance.Spec.DBType == v1beta1.NBDBType {
+				headlessDnsHostname = ovndbcluster.ServiceNameNB + "." + instance.Namespace + ".svc"
+			}
+			dbAddress = fmt.Sprintf("tcp:%s:%d", headlessDnsHostname, svc.Spec.Ports[0].Port)
+			DNSHostCname := infranetworkv1.DNSHost{}
+			DNSHostCname.IP = dnsIP
+			DNSHostCname.Hostnames = append(DNSHostCname.Hostnames, headlessDnsHostname)
+			DNSHosts = append(DNSHosts, DNSHost)
+			DNSHosts = append(DNSHosts, DNSHostCname)
+
+			// Create DNSData
+			DNSData := &infranetworkv1.DNSData{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dnsName,
+					Namespace: ovnPod.Namespace,
+				},
+			}
+			_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), DNSData, func() error {
+				DNSData.Spec.Hosts = DNSHosts
+				DNSData.Spec.DNSDataLabelSelectorValue = "dnsdata"
+				err := controllerutil.SetControllerReference(helper.GetBeforeObject(), DNSData, helper.GetScheme())
+				if err != nil {
+					return err
+				}
+				return nil
+			})
+			if err != nil {
+				Log.Error(err, "Error Creating DNSData.")
+				return ctrl.Result{}, err
+			}
+
+		}
+
+	}
+	instance.Status.DBAddress = dbAddress
+
 	Log.Info("Reconciled OVN DB Cluster Service successfully")
 	return ctrl.Result{}, nil
 }

@@ -117,7 +117,7 @@ var _ = Describe("OVNController controller", func() {
 			var scriptsCM types.NamespacedName
 			var dbs []types.NamespacedName
 			BeforeEach(func() {
-				dbs = CreateOVNDBClusters(namespace, "")
+				dbs = CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 				DeferCleanup(DeleteOVNDBClusters, dbs)
 				daemonSetName := types.NamespacedName{
 					Namespace: namespace,
@@ -181,7 +181,7 @@ var _ = Describe("OVNController controller", func() {
 				internalAPINADName := types.NamespacedName{Namespace: namespace, Name: "internalapi"}
 				nad := th.CreateNetworkAttachmentDefinition(internalAPINADName)
 				DeferCleanup(th.DeleteInstance, nad)
-				dbs = CreateOVNDBClusters(namespace, "internalapi")
+				dbs = CreateOVNDBClusters(namespace, map[string][]string{namespace + "/internalapi": {"10.0.0.0"}}, 1)
 				DeferCleanup(DeleteOVNDBClusters, dbs)
 				daemonSetName = types.NamespacedName{
 					Namespace: namespace,
@@ -230,7 +230,7 @@ var _ = Describe("OVNController controller", func() {
 
 	When("A OVNController instance is created with debug on", func() {
 		BeforeEach(func() {
-			dbs := CreateOVNDBClusters(namespace, "")
+			dbs := CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 			DeferCleanup(DeleteOVNDBClusters, dbs)
 			name := fmt.Sprintf("ovn-controller-%s", uuid.New().String())
 			spec := GetDefaultOVNControllerSpec()
@@ -274,7 +274,7 @@ var _ = Describe("OVNController controller", func() {
 			internalAPINADName := types.NamespacedName{Namespace: namespace, Name: "internalapi"}
 			nad := th.CreateNetworkAttachmentDefinition(internalAPINADName)
 			DeferCleanup(th.DeleteInstance, nad)
-			dbs = CreateOVNDBClusters(namespace, "internalapi")
+			dbs = CreateOVNDBClusters(namespace, map[string][]string{namespace + "/internalapi": {"10.0.0.1"}}, 1)
 			for _, db := range dbs {
 				DeferCleanup(th.DeleteInstance, GetOVNDBCluster(db))
 			}
@@ -437,6 +437,7 @@ var _ = Describe("OVNController controller", func() {
 				daemonSetName,
 				map[string][]string{namespace + "/internalapi": {"10.0.0.1"}},
 			)
+			ExpectedExternalSBEndpoint := "tcp:ovsdbserver-sb." + namespace + ".svc:6642"
 			externalSBEndpoint := "10.0.0.254"
 			SetExternalEndpoint(dbs[1], externalSBEndpoint)
 
@@ -450,7 +451,7 @@ var _ = Describe("OVNController controller", func() {
 
 			Eventually(func(g Gomega) {
 				g.Expect(th.GetConfigMap(externalCM).Data["ovsdb-config"]).Should(
-					ContainSubstring("ovn-remote: %s", externalSBEndpoint))
+					ContainSubstring("ovn-remote: %s", ExpectedExternalSBEndpoint))
 			}, timeout, interval).Should(Succeed())
 			Eventually(func(g Gomega) {
 				g.Expect(th.GetConfigMap(externalCM).Data["ovsdb-config"]).Should(
@@ -526,6 +527,7 @@ var _ = Describe("OVNController controller", func() {
 				map[string][]string{namespace + "/internalapi": {"10.0.0.1"}},
 			)
 			externalSBEndpoint := "10.0.0.254"
+			ExpectedExternalSBEndpoint := "tcp:ovsdbserver-sb." + namespace + ".svc:6642"
 			SetExternalEndpoint(dbs[1], externalSBEndpoint)
 
 			Eventually(func() corev1.ConfigMap {
@@ -534,7 +536,7 @@ var _ = Describe("OVNController controller", func() {
 
 			Eventually(func(g Gomega) {
 				g.Expect(th.GetConfigMap(externalCM).Data["ovsdb-config"]).Should(
-					ContainSubstring("ovn-remote: %s", externalSBEndpoint))
+					ContainSubstring("ovn-remote: %s", ExpectedExternalSBEndpoint))
 			}, timeout, interval).Should(Succeed())
 
 			newExternalSBEndpoint := "10.0.0.250"
@@ -542,7 +544,7 @@ var _ = Describe("OVNController controller", func() {
 
 			Eventually(func(g Gomega) {
 				g.Expect(th.GetConfigMap(externalCM).Data["ovsdb-config"]).Should(
-					ContainSubstring("ovn-remote: %s", newExternalSBEndpoint))
+					ContainSubstring("ovn-remote: %s", ExpectedExternalSBEndpoint))
 			}, timeout, interval).Should(Succeed())
 		})
 	})
@@ -551,7 +553,7 @@ var _ = Describe("OVNController controller", func() {
 		var dbs []types.NamespacedName
 
 		BeforeEach(func() {
-			dbs = CreateOVNDBClusters(namespace, "")
+			dbs = CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 			for _, db := range dbs {
 				DeferCleanup(th.DeleteInstance, GetOVNDBCluster(db))
 			}
@@ -578,7 +580,7 @@ var _ = Describe("OVNController controller", func() {
 	When("OVNController is created with nic configs", func() {
 		var OVNControllerName types.NamespacedName
 		BeforeEach(func() {
-			dbs := CreateOVNDBClusters(namespace, "")
+			dbs := CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 			DeferCleanup(DeleteOVNDBClusters, dbs)
 			name := fmt.Sprintf("ovn-controller-%s", uuid.New().String())
 			spec := GetDefaultOVNControllerSpec()
@@ -646,7 +648,7 @@ var _ = Describe("OVNController controller", func() {
 
 	When("OVNController is created with networkAttachment and nic configs", func() {
 		BeforeEach(func() {
-			dbs := CreateOVNDBClusters(namespace, "")
+			dbs := CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 			DeferCleanup(DeleteOVNDBClusters, dbs)
 			name := fmt.Sprintf("ovn-controller-%s", uuid.New().String())
 			spec := GetDefaultOVNControllerSpec()
@@ -691,7 +693,7 @@ var _ = Describe("OVNController controller", func() {
 
 	When("OVNController is created with networkAttachments and nic configs", func() {
 		BeforeEach(func() {
-			dbs := CreateOVNDBClusters(namespace, "")
+			dbs := CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 			DeferCleanup(DeleteOVNDBClusters, dbs)
 			name := fmt.Sprintf("ovn-controller-%s", uuid.New().String())
 			spec := GetDefaultOVNControllerSpec()
@@ -736,7 +738,7 @@ var _ = Describe("OVNController controller", func() {
 
 	When("OVNController is created with old networkAttachment and new networkAttachments and nic configs", func() {
 		BeforeEach(func() {
-			dbs := CreateOVNDBClusters(namespace, "")
+			dbs := CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 			DeferCleanup(DeleteOVNDBClusters, dbs)
 			name := fmt.Sprintf("ovn-controller-%s", uuid.New().String())
 			spec := GetDefaultOVNControllerSpec()
@@ -790,7 +792,7 @@ var _ = Describe("OVNController controller", func() {
 
 	When("OVNController is created with networkAttachments and nic configs", func() {
 		BeforeEach(func() {
-			dbs := CreateOVNDBClusters(namespace, "")
+			dbs := CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 			DeferCleanup(DeleteOVNDBClusters, dbs)
 			name := fmt.Sprintf("ovn-controller-%s", uuid.New().String())
 			spec := GetDefaultOVNControllerSpec()
@@ -843,7 +845,7 @@ var _ = Describe("OVNController controller", func() {
 
 	When("OVNController is created with old networkAttachment and new networkAttachments (shared value) and nic configs", func() {
 		BeforeEach(func() {
-			dbs := CreateOVNDBClusters(namespace, "")
+			dbs := CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 			DeferCleanup(DeleteOVNDBClusters, dbs)
 			name := fmt.Sprintf("ovn-controller-%s", uuid.New().String())
 			spec := GetDefaultOVNControllerSpec()
@@ -899,7 +901,7 @@ var _ = Describe("OVNController controller", func() {
 		var ovnControllerName types.NamespacedName
 
 		BeforeEach(func() {
-			dbs := CreateOVNDBClusters(namespace, "")
+			dbs := CreateOVNDBClusters(namespace, map[string][]string{}, 1)
 			DeferCleanup(DeleteOVNDBClusters, dbs)
 			name := fmt.Sprintf("ovn-controller-%s", uuid.New().String())
 			ovnControllerName = types.NamespacedName{Namespace: namespace, Name: name}
