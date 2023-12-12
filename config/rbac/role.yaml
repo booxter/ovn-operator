@@ -235,3 +235,11 @@ rules:
   - securitycontextconstraints
   verbs:
   - use
+- apiGroups:
+  - security.openshift.io
+  resourceNames:
+  - ovn-controller
+  resources:
+  - securitycontextconstraints
+  verbs:
+  - use

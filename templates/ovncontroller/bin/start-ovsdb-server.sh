@@ -15,7 +15,7 @@
 # under the License.
 set -ex
 
-CTL_ARGS="--system-id=random --no-ovs-vswitchd"
+CTL_ARGS="--system-id=random --no-ovs-vswitchd --ovsdb-server-priority=0"
 
 # Initialize or upgrade database if needed
 /usr/share/openvswitch/scripts/ovs-ctl start $CTL_ARGS

@@ -30,8 +30,9 @@ func DaemonSet(
 	annotations map[string]string,
 ) (*appsv1.DaemonSet, error) {
 
-	runAsUser := int64(0)
-	privileged := true
+	runAsUser := int64(OVSUid)
+	runAsGroup := int64(OVSGid)
+	privileged := false
 
 	//
 	// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
@@ -133,6 +134,8 @@ func DaemonSet(
 
 	envVars := map[string]env.Setter{}
 	envVars["CONFIG_HASH"] = env.SetValue(configHash)
+	// probably not needed
+	envVars["OVSDB_SERVER_PRIORITY"] = env.SetValue("0")
 
 	daemonset := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -150,6 +153,9 @@ func DaemonSet(
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: instance.RbacResourceName(),
+					SecurityContext: &corev1.PodSecurityContext{
+						FSGroup: &runAsGroup,
+					},
 					Containers: []corev1.Container{
 						// ovsdb-server container
 						{
@@ -170,6 +176,7 @@ func DaemonSet(
 									Drop: []corev1.Capability{},
 								},
 								RunAsUser:  &runAsUser,
+								RunAsGroup: &runAsGroup,
 								Privileged: &privileged,
 							},
 							Env:                      env.MergeEnvs([]corev1.EnvVar{}, envVars),
@@ -196,6 +203,7 @@ func DaemonSet(
 									Drop: []corev1.Capability{},
 								},
 								RunAsUser:  &runAsUser,
+								RunAsGroup: &runAsGroup,
 								Privileged: &privileged,
 							},
 							Env:                      env.MergeEnvs([]corev1.EnvVar{}, envVars),
@@ -227,6 +235,7 @@ func DaemonSet(
 									Drop: []corev1.Capability{},
 								},
 								RunAsUser:  &runAsUser,
+								RunAsGroup: &runAsGroup,
 								Privileged: &privileged,
 							},
 							Env:                      env.MergeEnvs([]corev1.EnvVar{}, envVars),
