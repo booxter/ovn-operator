@@ -119,28 +119,35 @@ func CreateOVNDBClusters(namespace string, nad map[string][]string, replicas int
 	for _, db := range []string{v1beta1.NBDBType, v1beta1.SBDBType} {
 		name := fmt.Sprintf("ovn-%s", uuid.New().String())
 		spec := GetDefaultOVNDBClusterSpec()
-		string_nad := ""
+		stringNad := ""
+		// OVNDBCluster doesn't allow multiple NADs, hence map len
+		// must be <= 1
+		Expect(len(nad)).Should(BeNumerically("<=", 1))
 		for k, _ := range nad {
 			if strings.Contains(k, "/") {
 				// k = namespace/nad_name, split[1] will return nad_name (e.g. internalapi)
-				string_nad += strings.Split(k, "/")[1]
+				stringNad = strings.Split(k, "/")[1]
 			}
 		}
+		if len(nad) != 0 {
+			// nad format needs to be map[string][]string{namespace + "/" + nad_name: ...} or empty
+			Expect(stringNad).ToNot(Equal(""))
+		}
 		spec["dbType"] = db
-		spec["networkAttachment"] = string_nad
+		spec["networkAttachment"] = stringNad
 		spec["replicas"] = replicas
 
 		instance := CreateOVNDBCluster(namespace, name, spec)
 
 		instance_name := types.NamespacedName{Name: instance.GetName(), Namespace: instance.GetNamespace()}
 
-		db_name := "nb"
+		dbName := "nb"
 		if db == v1beta1.SBDBType {
-			db_name = "sb"
+			dbName = "sb"
 		}
 		statefulSetName := types.NamespacedName{
 			Namespace: instance.GetNamespace(),
-			Name:      "ovsdbserver-" + db_name,
+			Name:      "ovsdbserver-" + dbName,
 		}
 		th.SimulateStatefulSetReplicaReadyWithPods(
 			statefulSetName,
@@ -239,18 +246,6 @@ func OVNControllerConditionGetter(name types.NamespacedName) condition.Condition
 	return instance.Status.Conditions
 }
 
-func SetExternalEndpoint(name types.NamespacedName, endpoint string) {
-	if endpoint != "" {
-		Eventually(func(g Gomega) {
-			cluster := GetOVNDBCluster(name)
-			cluster.Status.DBAddress = endpoint
-			g.Expect(k8sClient.Status().Update(ctx, cluster)).To(Succeed())
-		}, timeout, interval).Should(Succeed())
-	} else {
-		ScaleDBCluster(name, 0)
-	}
-}
-
 func SimulateDaemonsetNumberReadyWithPods(name types.NamespacedName, networkIPs map[string][]string) {
 	ds := GetDaemonSet(name)
 
@@ -311,6 +306,26 @@ func GetDNSDataList(name types.NamespacedName) *infranetworkv1.DNSDataList {
 	}).Should(Succeed())
 
 	return dnsList
+}
+
+func GetDNSDataHostnameIP(dnsDataName string, namespace string, dnsHostname string) string {
+	dnsEntry := GetDNSData(types.NamespacedName{Name: dnsDataName, Namespace: namespace})
+	// DNSData contains Hosts (an array), this array will contain
+	// ovsdbserver-sb-0.ns.svc and ovsdbserver-sb.ns.svc, need to get
+	// in which index is located the one which the flavor is currently testing (DNS Cname or DNS)
+	index := -1
+	ip := ""
+	for i, host := range dnsEntry.Spec.Hosts {
+		for _, hostname := range host.Hostnames {
+			if hostname == dnsHostname {
+				index = i
+			}
+		}
+	}
+	if index >= 0 {
+		ip = dnsEntry.Spec.Hosts[index].IP
+	}
+	return ip
 }
 
 func GetPod(name types.NamespacedName) *corev1.Pod {

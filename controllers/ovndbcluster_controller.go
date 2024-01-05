@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -471,8 +470,8 @@ func (r *OVNDBClusterReconciler) reconcileNormal(ctx context.Context, instance *
 
 			// Filter out headless services
 			if svc.Spec.ClusterIP != "None" {
-				internalDbAddress = append(internalDbAddress, fmt.Sprintf("tcp:%s.%s.svc.cluster.local:%d", svc.Name, svc.Namespace, svcPort))
-				raftAddress = append(raftAddress, fmt.Sprintf("tcp:%s.%s.svc.cluster.local:%d", svc.Name, svc.Namespace, svc.Spec.Ports[1].Port))
+				internalDbAddress = append(internalDbAddress, fmt.Sprintf("tcp:%s.%s.svc.%s:%d", svc.Name, svc.Namespace, v1beta1.DNSSuffix, svcPort))
+				raftAddress = append(raftAddress, fmt.Sprintf("tcp:%s.%s.svc.%s:%d", svc.Name, svc.Namespace, v1beta1.DNSSuffix, svc.Spec.Ports[1].Port))
 			}
 		}
 
@@ -483,6 +482,45 @@ func (r *OVNDBClusterReconciler) reconcileNormal(ctx context.Context, instance *
 	}
 	Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil
+}
+
+func getPodIPv4InNetwork(ovnPod corev1.Pod, instance *ovnv1.OVNDBCluster) (string, error) {
+	netStat, err := nad.GetNetworkStatusFromAnnotation(ovnPod.Annotations)
+	if err != nil {
+		err = fmt.Errorf("Error while getting the NAD for pod %s: %v", ovnPod.Name, err)
+		return "", err
+	}
+	var dnsIP string
+	for _, v := range netStat {
+		if v.Name == instance.Namespace+"/"+instance.Spec.NetworkAttachment {
+			// Return only IPv4 at the moment
+			for i := 0; i < len(v.IPs); i++ {
+				if !strings.Contains(v.IPs[i], ":") {
+					dnsIP = v.IPs[i]
+					break
+				}
+			}
+		}
+	}
+	return dnsIP, err
+}
+
+func deleteDNSData(ctx context.Context, helper *helper.Helper, dnsName string, namespace string) error {
+	// Delete DNS records for deleted services/pods
+	dnsData := &infranetworkv1.DNSData{}
+	err := helper.GetClient().Get(ctx, types.NamespacedName{Name: dnsName, Namespace: namespace}, dnsData)
+	if err != nil && !k8s_errors.IsNotFound(err) {
+		err = fmt.Errorf("Error while getting DNS record %s: %w", dnsName, err)
+		return err
+	} else if k8s_errors.IsNotFound(err) {
+		return nil
+	}
+	err = helper.GetClient().Delete(ctx, dnsData)
+	if err != nil {
+		err = fmt.Errorf("Error while cleaning up DNS record %s: %w", dnsName, err)
+		return err
+	}
+	return nil
 }
 
 func (r *OVNDBClusterReconciler) reconcileServices(
@@ -569,26 +607,22 @@ func (r *OVNDBClusterReconciler) reconcileServices(
 				svcLabels,
 			)
 			if err != nil {
+				err = fmt.Errorf("Error while deleting service with name %s: %w", serviceName, err)
 				return ctrl.Result{}, err
 			}
 			// Delete DNS records for deleted services/pods
-			dnsData := &infranetworkv1.DNSData{}
-			dnsName := fmt.Sprintf("dns-%s-%d", serviceName, i)
-			dnsNamespace := helper.GetBeforeObject().GetNamespace()
-			err = helper.GetClient().Get(ctx, types.NamespacedName{Name: dnsName, Namespace: dnsNamespace}, dnsData)
-			if err != nil && !k8s_errors.IsNotFound(err) {
-				Log.Info(fmt.Sprintf("Error while getting DNS object: %v", err))
-			}
-			err := helper.GetClient().Delete(ctx, dnsData)
+			namespace := helper.GetBeforeObject().GetNamespace()
+			dnsName := fmt.Sprintf("%s-%s-%d", v1beta1.DNSPrefix, serviceName, i)
+			err = deleteDNSData(ctx, helper, dnsName, namespace)
 			if err != nil {
-				Log.Info(fmt.Sprintf("Error while cleaning up the DNS record %s: %v", dnsName, err))
+				return ctrl.Result{}, err
 			}
-
 		}
 	}
 
 	podList, err = ovndbcluster.OVNDBPods(ctx, instance, helper, serviceLabels)
 	if err != nil {
+		err = fmt.Errorf("Error while retrieving OVNDBPods on %s cluster: %w", instance.Spec.DBType, err)
 		return ctrl.Result{}, err
 	}
 	// Assuming that the replicas is greater than 0 AND networkAttachment != ""
@@ -600,14 +634,7 @@ func (r *OVNDBClusterReconciler) reconcileServices(
 	// DNSData is needed to provide DNS outside the cluster (edpm nodes) which needs to have
 	// spec.NetworkAttachment != ""
 	if instance.Spec.NetworkAttachment != "" {
-		for i, ovnPod := range podList.Items {
-			if i >= int(*(instance.Spec.Replicas)) {
-				break
-			}
-			var dnsName string
-			var dnsIP string
-			var hostnames []string
-			dnsName = "dns-" + ovnPod.Name
+		for _, ovnPod := range podList.Items[:*(instance.Spec.Replicas)] {
 			// Get Hostname
 			svc, err := service.GetServiceWithName(
 				ctx,
@@ -616,75 +643,38 @@ func (r *OVNDBClusterReconciler) reconcileServices(
 				ovnPod.Namespace,
 			)
 			if err != nil {
+				err = fmt.Errorf("Error retrieving service %s: %w", ovnPod.Name, err)
 				return ctrl.Result{}, err
 			}
-			hostname := svc.ObjectMeta.Annotations[infranetworkv1.AnnotationHostnameKey]
-			hostnames = append(hostnames, hostname)
 
 			// Get IP
-			net_stat, err := nad.GetNetworkStatusFromAnnotation(ovnPod.Annotations)
+			dnsIP, err := getPodIPv4InNetwork(ovnPod, instance)
 			if err != nil {
-				Log.Info(fmt.Sprintf("Error while getting the NAD for pod %s: %v", ovnPod.Name, err))
 				return ctrl.Result{}, err
-			}
-			for _, v := range net_stat {
-				if v.Interface == instance.Spec.NetworkAttachment {
-					// Return only IPv4 at the moment
-					if !strings.Contains(v.IPs[0], ":") {
-						dnsIP = v.IPs[0]
-						break
-					}
-				}
 			}
 
 			if len(dnsIP) == 0 {
-				Log.Info(fmt.Sprintf("Error while getting pod %s %s IP, IP is empty", ovnPod.Name, instance.Spec.NetworkAttachment))
-				// TODO: uncommenting this 'continue' will break some tests.
-				// working on fixing it
-				//continue
+				Log.Info(fmt.Sprintf("Error while getting pod %s %s IPv4, IP is empty", ovnPod.Name, instance.Spec.NetworkAttachment))
+				continue
 			}
 
-			// Create DNSRecord
-			var DNSHosts []infranetworkv1.DNSHost
-			// ovsdbserver-(nb|sb)-n entry
-			DNSHost := infranetworkv1.DNSHost{}
-			DNSHost.IP = dnsIP
-			DNSHost.Hostnames = hostnames
-			// ovsdbserver-(sb|nb) entry
-			headlessDnsHostname := ovndbcluster.ServiceNameSB + "." + instance.Namespace + ".svc"
-			if instance.Spec.DBType == v1beta1.NBDBType {
-				headlessDnsHostname = ovndbcluster.ServiceNameNB + "." + instance.Namespace + ".svc"
-			}
-			dbAddress = fmt.Sprintf("tcp:%s:%d", headlessDnsHostname, svc.Spec.Ports[0].Port)
-			DNSHostCname := infranetworkv1.DNSHost{}
-			DNSHostCname.IP = dnsIP
-			DNSHostCname.Hostnames = append(DNSHostCname.Hostnames, headlessDnsHostname)
-			DNSHosts = append(DNSHosts, DNSHost)
-			DNSHosts = append(DNSHosts, DNSHostCname)
-
-			// Create DNSData
-			DNSData := &infranetworkv1.DNSData{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      dnsName,
-					Namespace: ovnPod.Namespace,
-				},
-			}
-			_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), DNSData, func() error {
-				DNSData.Spec.Hosts = DNSHosts
-				DNSData.Spec.DNSDataLabelSelectorValue = "dnsdata"
-				err := controllerutil.SetControllerReference(helper.GetBeforeObject(), DNSData, helper.GetScheme())
-				if err != nil {
-					return err
-				}
-				return nil
-			})
+			// Create DNSData CR
+			err = ovndbcluster.DnsData(
+				ctx,
+				helper,
+				svc,
+				dnsIP,
+				instance,
+				ovnPod,
+				serviceLabels,
+			)
 			if err != nil {
-				Log.Error(err, "Error Creating DNSData.")
 				return ctrl.Result{}, err
 			}
-
+			if dbAddress == "" {
+				dbAddress = ovndbcluster.GetDBAddress(instance, svc)
+			}
 		}
-
 	}
 	instance.Status.DBAddress = dbAddress
 

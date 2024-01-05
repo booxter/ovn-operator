@@ -91,57 +91,59 @@ var _ = Describe("OVNDBCluster controller", func() {
 				Entry("DNS entry NB", "sb"),
 				Entry("DNS entry SB", "nb"),
 			)
-			It("Should update DNSData IP if pod IP changes", func() {
-				var clusterName types.NamespacedName
-				var OVNSBDBClusterName types.NamespacedName
-				var cluster *ovnv1.OVNDBCluster
-				var dbs []types.NamespacedName
-				_ = th.CreateNetworkAttachmentDefinition(types.NamespacedName{Namespace: namespace, Name: "internalapi"})
-				dbs = CreateOVNDBClusters(namespace, map[string][]string{namespace + "/internalapi": {"10.0.0.1"}}, 3)
-				OVNSBDBClusterName = types.NamespacedName{Name: dbs[1].Name, Namespace: dbs[1].Namespace}
-				cluster = GetOVNDBCluster(OVNSBDBClusterName)
-				clusterName = OVNSBDBClusterName
-				// DnsEntry will have two entries, the ovsdbserver-sb.namespace.svc
-				// and the ovsdbserver-sb-0.namespace.svc, both will have same IP
-				// for this test ovsdbserver-sb-0 will be used.
-				Eventually(func(g Gomega) {
-					dnsEntry := GetDNSData(types.NamespacedName{Name: "dns-ovsdbserver-sb-0", Namespace: cluster.Namespace})
-					g.Expect(dnsEntry).To(Equal("10.0.0.1"))
-				})
+			DescribeTable("Should update DNSData IP if pod IP changes",
+				func(DNSEntryName string) {
+					var clusterName types.NamespacedName
+					var OVNSBDBClusterName types.NamespacedName
+					var cluster *ovnv1.OVNDBCluster
+					var dbs []types.NamespacedName
 
-				// Modify pod IP section
-				pod := GetPod(types.NamespacedName{Name: "ovsdbserver-sb-0", Namespace: cluster.Namespace})
-				// Create new pod NAD and add it to POD
-				var netStatus []networkv1.NetworkStatus
-				var IPString []string
-				IPString = append(IPString, "10.0.0.10")
-				netStatus = append(
-					netStatus,
-					networkv1.NetworkStatus{
-						Name: cluster.Namespace + "/internalip",
-						IPs:  IPString,
-					},
-				)
-				netStatusAnnotation, err := json.Marshal(netStatus)
-				Expect(err).NotTo(HaveOccurred())
-				pod.Annotations[networkv1.NetworkStatusAnnot] = string(netStatusAnnotation)
-				UpdatePod(pod)
-				// End modify pod IP section
+					_ = th.CreateNetworkAttachmentDefinition(types.NamespacedName{Namespace: namespace, Name: "internalapi"})
+					dbs = CreateOVNDBClusters(namespace, map[string][]string{namespace + "/internalapi": {"10.0.0.1"}}, 3)
+					OVNSBDBClusterName = types.NamespacedName{Name: dbs[1].Name, Namespace: dbs[1].Namespace}
+					cluster = GetOVNDBCluster(OVNSBDBClusterName)
+					clusterName = OVNSBDBClusterName
+					fullDNSEntryName := DNSEntryName + "." + cluster.Namespace + ".svc"
 
-				// Call reconcile loop
-				Eventually(func(g Gomega) {
-					c := GetOVNDBCluster(clusterName)
-					// Change something just to call reconcile loop
-					*&c.Spec.ElectionTimer = 11000
-					g.Expect(k8sClient.Update(ctx, c)).Should(Succeed())
-				}).Should(Succeed())
+					// Check that DNSData info has been created with correct IP (10.0.0.1)
+					Eventually(func(g Gomega) {
+						ip := GetDNSDataHostnameIP("dns-ovsdbserver-sb-0", cluster.Namespace, fullDNSEntryName)
+						g.Expect(ip).Should(Equal("10.0.0.1"))
+					}).Should(Succeed())
 
-				Eventually(func(g Gomega) {
-					dnsEntry := GetDNSData(types.NamespacedName{Name: "dns-ovsdbserver-sb-0", Namespace: cluster.Namespace})
-					g.Expect(dnsEntry).To(Equal("10.0.0.10"))
-				})
+					// Modify pod IP section
+					pod := GetPod(types.NamespacedName{Name: "ovsdbserver-sb-0", Namespace: cluster.Namespace})
+					// Create new pod NAD and add it to POD
+					netStatus := []networkv1.NetworkStatus{
+						networkv1.NetworkStatus{
+							Name: cluster.Namespace + "/internalapi",
+							IPs:  []string{"10.0.0.10"},
+						},
+					}
+					netStatusAnnotation, err := json.Marshal(netStatus)
+					Expect(err).NotTo(HaveOccurred())
+					pod.Annotations[networkv1.NetworkStatusAnnot] = string(netStatusAnnotation)
+					UpdatePod(pod)
+					// End modify pod IP section
 
-			})
+					// Call reconcile loop
+					Eventually(func(g Gomega) {
+						c := GetOVNDBCluster(clusterName)
+						// Change something just to call reconcile loop
+						*&c.Spec.ElectionTimer = 11000
+						g.Expect(k8sClient.Update(ctx, c)).Should(Succeed())
+					}).Should(Succeed())
+
+					// Check that DNSData info has been modified with correct IP (10.0.0.10)
+					Eventually(func(g Gomega) {
+						ip := GetDNSDataHostnameIP("dns-ovsdbserver-sb-0", cluster.Namespace, fullDNSEntryName)
+						g.Expect(ip).Should(Equal("10.0.0.10"))
+					}).Should(Succeed())
+
+				},
+				Entry("DNS CName entry", "ovsdbserver-sb"),
+				Entry("DNS entry", "ovsdbserver-sb-0"),
+			)
 		})
 
 	When("A OVNDBCluster instance is created", func() {

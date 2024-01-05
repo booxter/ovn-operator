@@ -31,6 +31,10 @@ const (
 	// SBDBType - Southbound database type
 	SBDBType = "SB"
 
+	// DNS naming prefix
+	DNSPrefix = "dns"
+	DNSSuffix = "cluster.local"
+
 	// Container image fall-back defaults
 
 	// OvnNBContainerImage is the fall-back container image for OVNDBCluster NB
