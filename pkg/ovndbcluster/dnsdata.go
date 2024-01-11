@@ -63,16 +63,14 @@ func DnsData(
 }
 
 func GetDBAddress(instance *ovnv1.OVNDBCluster, svc *corev1.Service) string {
-	dbAddress := ""
-	headlessDnsHostname := ServiceNameSB + "." + instance.Namespace + ".svc"
+	if svc == nil {
+		return ""
+	}
+	var headlessDnsHostname string
 	if instance.Spec.DBType == v1beta1.NBDBType {
 		headlessDnsHostname = ServiceNameNB + "." + instance.Namespace + ".svc"
+	} else {
+		headlessDnsHostname = ServiceNameSB + "." + instance.Namespace + ".svc"
 	}
-	if dbAddress == "" {
-		// Since DNS is used for DBAddress value will be the same for each iteration
-		// (tcp:ovsdbserver-(nb|sb).openstack.svc), using if to avoid setting it up
-		// every iteration
-		dbAddress = fmt.Sprintf("tcp:%s:%d", headlessDnsHostname, svc.Spec.Ports[0].Port)
-	}
-	return dbAddress
+	return fmt.Sprintf("tcp:%s:%d", headlessDnsHostname, svc.Spec.Ports[0].Port)
 }

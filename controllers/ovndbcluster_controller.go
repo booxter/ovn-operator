@@ -622,18 +622,15 @@ func (r *OVNDBClusterReconciler) reconcileServices(
 		err = fmt.Errorf("Error while retrieving OVNDBPods on %s cluster: %w", instance.Spec.DBType, err)
 		return ctrl.Result{}, err
 	}
-	// Assuming that the replicas is greater than 0 AND networkAttachment != ""
-	// dbAddress will contain ovsdbserver-(nb|sb).openstack.svc
-	// if replicas == 0 or networkAttachment == "" dbAddress will be empty.
-	// Meaning that Status.DBAddress is not ready.
-	dbAddress := ""
+
+	var svc *corev1.Service
 
 	// DNSData is needed to provide DNS outside the cluster (edpm nodes) which needs to have
 	// spec.NetworkAttachment != ""
 	if instance.Spec.NetworkAttachment != "" {
 		for _, ovnPod := range podList.Items[:*(instance.Spec.Replicas)] {
 			// Get Hostname
-			svc, err := service.GetServiceWithName(
+			svc, err = service.GetServiceWithName(
 				ctx,
 				helper,
 				ovnPod.Name,
@@ -668,12 +665,9 @@ func (r *OVNDBClusterReconciler) reconcileServices(
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			if dbAddress == "" {
-				dbAddress = ovndbcluster.GetDBAddress(instance, svc)
-			}
 		}
 	}
-	instance.Status.DBAddress = dbAddress
+	instance.Status.DBAddress = ovndbcluster.GetDBAddress(instance, svc)
 
 	Log.Info("Reconciled OVN DB Cluster Service successfully")
 	return ctrl.Result{}, nil
