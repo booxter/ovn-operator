@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -506,19 +506,16 @@ func getPodIPv4InNetwork(ovnPod corev1.Pod, instance *ovnv1.OVNDBCluster) (strin
 }
 
 func deleteDNSData(ctx context.Context, helper *helper.Helper, dnsName string, namespace string) error {
-	// Delete DNS records for deleted services/pods
-	dnsData := &infranetworkv1.DNSData{}
-	err := helper.GetClient().Get(ctx, types.NamespacedName{Name: dnsName, Namespace: namespace}, dnsData)
-	if err != nil && !k8s_errors.IsNotFound(err) {
-		err = fmt.Errorf("Error while getting DNS record %s: %w", dnsName, err)
-		return err
-	} else if k8s_errors.IsNotFound(err) {
-		return nil
+	dnsData := &infranetworkv1.DNSData{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dnsName,
+			Namespace: namespace,
+		},
 	}
-	err = helper.GetClient().Delete(ctx, dnsData)
-	if err != nil {
-		err = fmt.Errorf("Error while cleaning up DNS record %s: %w", dnsName, err)
-		return err
+
+	err := helper.GetClient().Delete(ctx, dnsData)
+	if err != nil && !k8s_errors.IsNotFound(err) {
+		return fmt.Errorf("Error while cleaning up DNS record %s: %w", dnsName, err)
 	}
 	return nil
 }
